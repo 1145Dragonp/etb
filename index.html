@@ -131,6 +131,7 @@
 <script>
 /******************************************************************
  *  纯触屏桌球 – 完整版 + 远程音效 + 粒子效果
+ *  修改：添加本地持久化（保存等级/进度/累计分数），并使“重置”按钮清除本地数据。
  ******************************************************************/
 
 /* ---------- 远程音效 ---------- */
@@ -189,6 +190,46 @@ let level = 0, levelProgress = 0;
 const MAX_LEVEL_ATTR = 40;
 let unlock10Shown = false;
 
+/* ========== 持久化（localStorage） ========== */
+const STORAGE_KEY = 'etb_state_v1';
+
+function saveState() {
+  try {
+    const state = {
+      level,
+      levelProgress,
+      totalScore,
+      unlock10Shown: !!unlock10Shown
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    // localStorage 失败则忽略
+    console.warn('保存状态失败', e);
+  }
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    if (typeof s.level === 'number') level = s.level;
+    if (typeof s.levelProgress === 'number') levelProgress = s.levelProgress;
+    if (typeof s.totalScore === 'number') totalScore = s.totalScore;
+    if (typeof s.unlock10Shown === 'boolean') unlock10Shown = s.unlock10Shown;
+  } catch (e) {
+    console.warn('读取状态失败', e);
+  }
+}
+
+function clearState() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch (e) {
+    console.warn('清除状态失败', e);
+  }
+}
+
 /* ---------- 公式 ---------- */
 function getRequiredForLevel(l) {
   return l <= MAX_LEVEL_ATTR ? 6 + l * 2 : 86;
@@ -229,6 +270,9 @@ function resizeCanvas() {
   initializeGame();
 }
 function initializeGame() {
+  // 本局分数归零（但保留已保存的等级/进度/totalScore）
+  score = 0;
+
   balls = []; pockets = [];
   const pr = 20;
   [[pr,pr],[canvas.width/2,pr],[canvas.width-pr,pr],
@@ -256,6 +300,7 @@ function updateLevel() {
   levelDisplay.textContent = `等级: ${level}`;
   progressFill.style.width = `${prog*100}%`;
   progressText.textContent = `${Math.floor(levelProgress)}/${req}`;
+  // 升级检测
   if(prog>=1&&levelProgress>=req){
     level++;
     levelProgress = 0;   // 清空已进球
@@ -265,9 +310,12 @@ function updateLevel() {
       unlock10Shown=true;
     }
   }
+  // 保存状态（等级/进度）
+  saveState();
 }
 function updateScoreDisplay(){
-  scoreDisplay.textContent = `得分: ${score} | 击球: ${shotsTaken}/${getShotsPerRound(level)} | 本局: ${score}`;
+  // 显示累计得分、当前回合击球次数、本局分数
+  scoreDisplay.textContent = `得分: ${totalScore} | 击球: ${shotsTaken}/${getShotsPerRound(level)} | 本局总分: ${score}`;
 }
 
 /* ========== 瞄准虚线 ========== */
@@ -372,10 +420,11 @@ function update(){
         b2.x+=over*cos/2;b2.y+=over*sin/2;
         playSound('hit.ogg');        // 球撞球
 
-        // 生成粒子效果
-        for (let k = 0; k < 20; k++) {
-          particles.push(new Particle(b1.x, b1.y, b1.color));
-          particles.push(new Particle(b2.x, b2.y, b2.color));
+        // 生成粒子效果（为避免粒子无限增长，限制最大数量）
+        const MAX_PARTICLES = 300;
+        for (let k = 0; k < 12; k++) {
+          if (particles.length < MAX_PARTICLES) particles.push(new Particle(b1.x, b1.y, b1.color));
+          if (particles.length < MAX_PARTICLES) particles.push(new Particle(b2.x, b2.y, b2.color));
         }
       }
     }
@@ -385,13 +434,24 @@ function update(){
   /* -------- 结束检测 & 字幕 & 清台+5 -------- */
   const colorLeft=balls.filter(b=>b.type==='color').length;
   if(needReset){
-    showSubtitle('白球入洞');totalScore+=score;roundScores.push(score);initializeGame();return;
+    showSubtitle('白球入洞');
+    totalScore+=score;
+    roundScores.push(score);
+    // 保存 totalScore
+    saveState();
+    initializeGame();return;
   }
   if(colorLeft===0){
-    levelProgress+=5;updateLevel();showSubtitle('恭喜你！打完所有球');totalScore+=score;roundScores.push(score);initializeGame();return;
+    levelProgress+=5;updateLevel();showSubtitle('恭喜你！打完所有球');
+    totalScore+=score;roundScores.push(score);
+    saveState();
+    initializeGame();return;
   }
   if(shotsTaken>=getShotsPerRound(level)){
-    showSubtitle('上一局回合结束现在重新开始');totalScore+=score;roundScores.push(score);initializeGame();return;
+    showSubtitle('上一局回合结束现在重新开始');
+    totalScore+=score;roundScores.push(score);
+    saveState();
+    initializeGame();return;
   }
 }
 
@@ -409,8 +469,28 @@ function handleEnd(){
     isAiming=false;aimStart=null;aimEnd=null;shotsTaken++;updateScoreDisplay();update();
   }
 }
-resetButton.addEventListener('click',()=>{totalScore=0;level=0;levelProgress=0;unlock10Shown=false;initializeGame();});
-function getPos(e){const r=canvas.getBoundingClientRect();return{x:(e.touches?e.touches[0].clientX:e.clientX)-r.left,y:(e.touches?e.touches[0].clientY:e.clientY)-r.top};}
+// 修改：reset 按钮现在清除本地保存的数据并重新开始
+resetButton.addEventListener('click',()=>{ 
+  clearState();
+  totalScore=0; level=0; levelProgress=0; unlock10Shown=false;
+  roundScores = [];
+  score = 0;
+  initializeGame();
+  updateLevel();
+  updateScoreDisplay();
+});
+
+function getPos(e){
+  const r=canvas.getBoundingClientRect();
+  // 优先使用 changedTouches，以便 touchend 时也能取到位置
+  if (e.touches && e.touches.length) {
+    return { x: e.touches[0].clientX - r.left, y: e.touches[0].clientY - r.top };
+  } else if (e.changedTouches && e.changedTouches.length) {
+    return { x: e.changedTouches[0].clientX - r.left, y: e.changedTouches[0].clientY - r.top };
+  } else {
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+}
 canvas.addEventListener('touchstart',e=>{e.preventDefault();const p=getPos(e);handleStart(p.x,p.y);});
 canvas.addEventListener('touchmove',e=>{e.preventDefault();const p=getPos(e);handleMove(p.x,p.y);});
 canvas.addEventListener('touchend',e=>{e.preventDefault();handleEnd();});
@@ -419,6 +499,8 @@ canvas.addEventListener('mousemove',e=>{const p=getPos(e);handleMove(p.x,p.y);})
 canvas.addEventListener('mouseup',e=>{handleEnd();});
 
 /* ========== 启动 ========== */
+// 先加载保存的状态（等级/进度/累计得分等），再初始化场景
+loadState();
 window.addEventListener('resize',resizeCanvas);
 resizeCanvas();
 updateLevel();
@@ -428,4 +510,4 @@ draw();
 
     
 </body>
-  </html>
+</html>
